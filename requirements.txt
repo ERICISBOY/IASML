@@ -1,0 +1,19 @@
+# 必须指定版本的库
+numpy>=1.21.6,<2.0.0
+pandas>=1.5.0,<2.0.0  # 确保包含StringMethods
+
+# 自动安装最新兼容版本的其他依赖
+scikit-learn
+tensorflow
+xgboost
+lightgbm
+matplotlib
+statsmodels
+pyyaml
+pandas-plink
+tqdm
+keras
+scipy
+joblib
+dask
+scikeras
