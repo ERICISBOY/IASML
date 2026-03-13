@@ -1,0 +1,5 @@
+# Cloud platform (app.py) — install these in addition to requirements.txt
+# The cloud UI needs Shiny and nest_asyncio; analyses need the full IASML stack.
+
+shiny>=1.0.0
+nest_asyncio>=1.5.0
