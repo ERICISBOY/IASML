@@ -188,6 +188,31 @@ python IASML.py \
 
 This will generate `Ref1.txt ... Ref5.txt` and `Val1.txt ... Val5.txt` for 5‑fold phenotype CV splits and then exit.
 
+### 3.6 Using an external validation set (`--Val`, `--Val-pos`)
+
+```bash
+python IASML.py \
+  --bfile data/genotype_prefix \
+  --phe data/train_phenotype.txt \
+  --phe-pos 3 \
+  --model lightgbm \
+  --Val data/val_phenotype.txt \
+  --Val-pos 3 \
+  --out wheat_lgbm_val
+```
+
+In this case:
+
+- `--phe` / `--phe-pos` define the **training** phenotype.
+- `--Val` / `--Val-pos` define an **external validation** phenotype file and target column.
+- IASML will:
+  - Train the model on the training set.
+  - Predict on the genotypes corresponding to the validation file.
+  - Compute Pearson correlation between predicted values and the external validation phenotype.
+  - Report the Pearson statistic in the log and summary.
+
+If you only want an internal validation (on the training phenotype file itself), you can instead use `--val <filename>` together with the same `--phe-pos`.
+
 ---
 
 ## 4. The `--gather` ensemble search
