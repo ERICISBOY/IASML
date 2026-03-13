@@ -60,7 +60,7 @@ Then start the app:
 python app.py
 ```
 
-By default it listens on `http://0.0.0.0:8001`; open that address in your browser.
+By default it listens on `http://0.0.0.0:18001`; open that address in your browser.
 
 ---
 
