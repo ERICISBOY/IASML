@@ -22,6 +22,15 @@ from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Queue
 from queue import Empty
 
+# ========= 全局路径配置（本地 + 云端兼容） =========
+# 本地开发时，此路径一般不存在，会自动退回到当前文件所在目录。
+# 在阿里云服务器上，你的实际工作目录是 /home/duckfarm/lxzhu/IASML_online_zh。
+DEFAULT_WORK_ROOT = Path("/home/duckfarm/lxzhu/IASML_online_zh")
+if DEFAULT_WORK_ROOT.exists():
+    WORK_ROOT = DEFAULT_WORK_ROOT
+else:
+    WORK_ROOT = Path(__file__).parent
+
 # ========== 全局配置 ==========
 CSS = """
 /* 自定义样式 */
@@ -225,6 +234,23 @@ DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)  # 确保目录存在
 
 README_PATH = Path(__file__).parent / "Download_README.md"
 AI_PATH = Path(__file__).parent / "Algorithm_Introduction.md"
+
+# 预置模型名称映射：界面显示名 -> IASML 命令行模型名
+MODEL_NAME_MAP = {
+    "SVM": "svm",
+    "Ridge": "ridge",
+    "Lasso": "lasso",
+    "Elasticnet": "elasticnet",
+    "Decision_tree": "decision_tree",
+    "Random_forest": "random_forest",
+    "LightGBM": "lightgbm",
+    "XGBoost": "xgboost",
+    "Linear": "linear",
+    "PLS": "pls",
+    "GBM": "gbm",
+    "CNN": "cnn",
+    "MLP": "mlp",
+}
 def create_feature_card(title, items, border_color):
     return ui.div(
         ui.h5(title, style="font-size: 140%; margin-bottom: 20px;"),
@@ -247,8 +273,8 @@ def create_feature_card(title, items, border_color):
 # ========== 修改 AnalysisExecutor 类 ==========
 class AnalysisExecutor:
     def __init__(self):
-        # 使用指定可写路径作为临时目录
-        self.temp_dir = Path("/home/duckfarm/lxzhu/IASML_online_zh")
+        # 使用统一的工作根目录（本地为项目目录，云端为 /home/duckfarm/lxzhu/IASML_online_zh）
+        self.temp_dir = WORK_ROOT
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         # 新增上传文件存储目录
         self.upload_dir = self.temp_dir / "uploads"
@@ -259,18 +285,9 @@ class AnalysisExecutor:
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             work_dir = self.temp_dir / timestamp
             work_dir.mkdir(exist_ok=True)
-            
-            # 复制上传文件到工作目录
-            for file_type in ["geno", "pheno", "model_params", "model_frame"]:
-                if f"--{file_type}" in cmd:
-                    idx = cmd.index(f"--{file_type}") + 1
-                    src_path = Path(cmd[idx])
-                    dest_path = work_dir / src_path.name
-                    shutil.copy(src_path, dest_path)
-                    cmd[idx] = str(dest_path)  # 更新命令中的文件路径
 
-            # 重构命令构建逻辑
-            executable_cmd = ["python", str("/home/duckfarm/lxzhu/IASML_online_zh/IASML.py")]
+            # 重构命令构建逻辑，始终调用 WORK_ROOT 下的 IASML.py
+            executable_cmd = ["python", str(WORK_ROOT / "IASML.py")]
             
             # 添加基因型文件参数
             if '--tfile' in cmd:
@@ -278,14 +295,14 @@ class AnalysisExecutor:
             else:
                 executable_cmd += ["--bfile", str(Path(cmd[cmd.index('--bfile')+1]).resolve())]
             
-            # 添加必要参数（确保存在性检查）
-            required_params = ['--phe', '--phe-pos']
+            # 添加必要参数（确保存在性检查），包括统一的输出前缀 --out
+            required_params = ['--phe', '--phe-pos', '--out']
             for param in required_params:
                 if param in cmd:
                     idx = cmd.index(param)
                     executable_cmd += [param, str(cmd[idx+1])]
             
-            # 模型参数互斥处理（增加存在性检查）
+            # 模型 / 参数文件 / Keras 模型
             model_params = ['--model', '--model-params', '--model-frame']
             for param in model_params:
                 if param in cmd:
@@ -296,6 +313,18 @@ class AnalysisExecutor:
                     else:
                         value = cmd[idx+1]  # 直接使用模型名称
                     executable_cmd += [param, value]
+
+            # gather 集成参数（可能跟多个模型名一起）
+            if '--gather' in cmd:
+                g_idx = cmd.index('--gather')
+                gather_args = ['--gather']
+                # 收集紧随其后的所有非选项 token 作为模型名
+                i = g_idx + 1
+                while i < len(cmd) and not str(cmd[i]).startswith('--'):
+                    gather_args.append(str(cmd[i]))
+                    i += 1
+                if len(gather_args) > 1:
+                    executable_cmd += gather_args
 
             # 替换为异步子进程调用
             process = await asyncio.create_subprocess_exec(
@@ -334,15 +363,6 @@ class AnalysisExecutor:
 # 在页面头部添加MathJax支持
 app_ui = ui.page_navbar(
     ui.head_content(
-        ui.tags.script("""
-            // 心跳检测（每30秒发送一次请求）
-            setInterval(() => {
-                fetch('/_ping_');
-            }, 30000);
-        """),
-        # ... existing head content...
-    ),
-    ui.head_content(
         ui.tags.link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"),
         ui.tags.script(src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"),  # 新增MathJax
         ui.tags.script("""
@@ -365,56 +385,102 @@ app_ui = ui.page_navbar(
             };
         """),
         ui.tags.script(src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"),  # 新增Bootstrap JS
-        ui.tags.script("$(function () { $('[data-bs-toggle=\"tooltip\"]').tooltip() })")  
+        ui.tags.script("$(function () { $('[data-bs-toggle=\"tooltip\"]').tooltip() })"),
+        # 简单语言切换脚本：遍历 .lang-en / .lang-zh 控制显示（每次默认英文）
+        ui.tags.script("""
+            document.addEventListener('DOMContentLoaded', function () {
+                function setLang(lang) {
+                    var enEls = document.querySelectorAll('.lang-en');
+                    var zhEls = document.querySelectorAll('.lang-zh');
+                    if (lang === 'zh') {
+                        zhEls.forEach(function (el) { el.style.display = ''; });
+                        enEls.forEach(function (el) { el.style.display = 'none'; });
+                    } else {
+                        enEls.forEach(function (el) { el.style.display = ''; });
+                        zhEls.forEach(function (el) { el.style.display = 'none'; });
+                    }
+                }
+                // 每次加载页面都先强制英文
+                setLang('en');
+                var enLink = document.getElementById('lang-switch-en');
+                var zhLink = document.getElementById('lang-switch-zh');
+                if (enLink) {
+                    enLink.addEventListener('click', function (evt) {
+                        evt.preventDefault();
+                        setLang('en');
+                    });
+                }
+                if (zhLink) {
+                    zhLink.addEventListener('click', function (evt) {
+                        evt.preventDefault();
+                        setLang('zh');
+                    });
+                }
+            });
+        """),
     ),
 
     # 在线使用页面
-    ui.nav_panel("在线使用",
+    ui.nav_panel(
+        ui.div(
+            ui.span("在线使用", class_="lang-zh"),
+            ui.span("Online usage", class_="lang-en"),
+        ),
         ui.div(
             ui.layout_columns(
                 # 数据上传卡片
                 ui.card(
-                    ui.card_header("数据上传"),
+                    ui.card_header(
+                        ui.span("数据上传", class_="lang-zh"),
+                        ui.span("Data upload", class_="lang-en"),
+                    ),
                     ui.input_radio_buttons(
                         "file_type",
-                        "分子标记文件格式:",
+                        ui.div(
+                            ui.span("分子标记文件格式:", class_="lang-zh"),
+                            ui.span("Molecular marker file format:", class_="lang-en"),
+                        ),
                         {
                             "bfile": ui.span(
-                                "Plink二进制格式",
-                                ui.span(
-                                    ui.tags.i(
-                                        class_="fa-solid fa-circle-question",
-                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;"
-                                    ),
-                                    title="请提供bed、bim、fam三个文件，文件大小不超过100M",
+                                ui.span("Plink二进制格式", class_="lang-zh"),
+                                ui.span("Plink binary format", class_="lang-en"),
+                                ui.tags.i(
+                                    class_="fa-solid fa-circle-question",
+                                    style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                    title="Please provide bed/bim/fam files, each no larger than 100 MB / 请提供bed、bim、fam三个文件，文件大小不超过100M",
                                     data_bs_toggle="tooltip"
                                 )
                             ),
                             "tfile": ui.span(
-                                "TXT格式",
-                                ui.span(
-                                    ui.tags.i(
-                                        class_="fa-solid fa-circle-question",
-                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;"
-                                    ),
-                                    title="请按照每行一个个体、每列一个分子标记的方式排列",
+                                ui.span("TXT格式", class_="lang-zh"),
+                                ui.span("TXT format", class_="lang-en"),
+                                ui.tags.i(
+                                    class_="fa-solid fa-circle-question",
+                                    style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                    title="Each row is one individual and each column is one marker / 请按照每行一个个体、每列一个分子标记的方式排列",
                                     data_bs_toggle="tooltip"
                                 )
                             )
                         }
                     ),
-                    ui.input_file("geno_file", "选择分子标记文件", multiple=True),
+                    ui.input_file(
+                        "geno_file",
+                        ui.div(
+                            ui.span("选择分子标记文件", class_="lang-zh"),
+                            ui.span("Choose genotype file", class_="lang-en"),
+                        ),
+                        multiple=True,
+                    ),
                     # 修改为行内布局
                     ui.div(
                         ui.div(
                             ui.span(
-                                "选择表型文件（TXT格式）",
-                                ui.span(
-                                    ui.tags.i(
-                                        class_="fa-solid fa-circle-question", 
-                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;"
-                                    ),
-                                    title="请将各个性状名放在第一行，各个体名放在第一列。",
+                                ui.span("选择表型文件（TXT格式）", class_="lang-zh"),
+                                ui.span("Choose phenotype file (TXT)", class_="lang-en"),
+                                ui.tags.i(
+                                    class_="fa-solid fa-circle-question", 
+                                    style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                    title="Put trait names in the first row and individual IDs in the first column / 请将各个性状名放在第一行，各个体名放在第一列。",
                                     data_bs_toggle="tooltip",
                                     data_bs_placement="top"
                                 ),
@@ -430,92 +496,234 @@ app_ui = ui.page_navbar(
                 ),
                 # 模型设置卡片
                 ui.card(
-                    ui.card_header("模型设置"),
+                    ui.card_header(
+                        ui.span("模型设置", class_="lang-zh"),
+                        ui.span("Model settings", class_="lang-en"),
+                    ),
                     ui.input_radio_buttons(
-                        "model_type", "模型类型",
+                        "model_type",
+                        ui.div(
+                            ui.span("模型类型", class_="lang-zh"),
+                            ui.span("Model type", class_="lang-en"),
+                        ),
                         {
                             "prebuilt": ui.span(
-                                "预置模型",
-                                ui.span(
-                                    ui.tags.i(
-                                        class_="fa-solid fa-circle-question",
-                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;"
-                                    ),
-                                    title="选择特定模型，使用本平台预置的参数搜索策略获取模型最佳参数进行计算",
+                                ui.span("预置模型", class_="lang-zh"),
+                                ui.span("Predefined model", class_="lang-en"),
+                                ui.tags.i(
+                                    class_="fa-solid fa-circle-question",
+                                    style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                    title="Choose a specific model and use the platform's built-in search strategy to find the best hyperparameters / 选择特定模型，使用本平台预置的参数搜索策略获取模型最佳参数进行计算",
                                     data_bs_toggle="tooltip",
                                     data_bs_placement="top"
                                 )
                             ),
                             "params_file": ui.span(
-                                "上传超参数文件",
-                                ui.span(
-                                    ui.tags.i(
-                                        class_="fa-solid fa-circle-question",
-                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;"
-                                    ),
-                                    title="该选项针对神经网络以外的模型，用户可根据需要自定义模型的超参数",
+                                ui.span("上传超参数文件", class_="lang-zh"),
+                                ui.span("Upload hyperparameter file", class_="lang-en"),
+                                ui.tags.i(
+                                    class_="fa-solid fa-circle-question",
+                                    style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                    title="For non-neural-network models, you can customize hyperparameters by uploading a config file / 该选项针对神经网络以外的模型，用户可根据需要自定义模型的超参数",
                                     data_bs_toggle="tooltip",
                                     data_bs_placement="top"
                                 )
                             ),
                             "keras_model": ui.span(
-                                "上传Keras模型",
-                                ui.span(
-                                    ui.tags.i(
-                                        class_="fa-solid fa-circle-question",
-                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;"
-                                    ),
-                                    title="可以直接使用已经训练好的神经网络模型用于预测，请将待预测个体的特征与之前用于训练个体的特征保持一致",
+                                ui.span("上传Keras模型", class_="lang-zh"),
+                                ui.span("Upload Keras model", class_="lang-en"),
+                                ui.tags.i(
+                                    class_="fa-solid fa-circle-question",
+                                    style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                    title="Use an already trained neural network for prediction; feature layout must match the training data / 可以直接使用已经训练好的神经网络模型用于预测，请将待预测个体的特征与之前用于训练个体的特征保持一致",
                                     data_bs_toggle="tooltip",
                                     data_bs_placement="top"
                                 )
                             )
                         }
                     ),
-                    # 预置模型选择
+                    # 预置模型 / gather 选择
                     ui.panel_conditional(
                         "input.model_type == 'prebuilt'",
-                        ui.input_select(
-                            "model", "选择模型",
-                            choices=[
-                                "SVM", "Ridge", "Lasso", "Elasticnet",
-                                "Decision_tree", "Random_forest", 
-                                "LightGBM", "XGBoost", "Linear", "PLS", "GBM","CNN","MLP"
-                            ]
+                        ui.TagList(
+                            ui.input_select(
+                                "model",
+                                ui.div(
+                                    ui.span("选择模型", class_="lang-zh"),
+                                    ui.span("Choose model", class_="lang-en"),
+                                    ui.tags.i(
+                                        class_="fa-solid fa-circle-question",
+                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                        title="Choose one predefined model for training and prediction / 选择一个预置模型用于训练和预测",
+                                        data_bs_toggle="tooltip",
+                                        data_bs_placement="top"
+                                    ),
+                                ),
+                                choices=[
+                                    "SVM", "Ridge", "Lasso", "Elasticnet",
+                                    "Decision_tree", "Random_forest", 
+                                    "LightGBM", "XGBoost", "Linear", "PLS", "GBM","CNN","MLP"
+                                ]
+                            ),
+                            ui.div(style="margin-top: 10px;"),
+                            ui.input_checkbox(
+                                "use_gather",
+                                ui.div(
+                                    ui.span("启用集成策略（gather，在多模型中自动择优）", class_="lang-zh"),
+                                    ui.span("Enable ensemble strategy (gather, automatically selects the best model among multiple models)", class_="lang-en"),
+                                    ui.tags.i(
+                                        class_="fa-solid fa-circle-question",
+                                        style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                        title="Turn on automatic model ensemble search; IASML will evaluate multiple base models and choose the best / 启用模型集成自动搜索，IASML 会在多个基础模型中评估并择优",
+                                        data_bs_toggle="tooltip",
+                                        data_bs_placement="top"
+                                    ),
+                                ),
+                                value=False
+                            ),
+                            ui.panel_conditional(
+                                "input.use_gather",
+                                ui.input_selectize(
+                                    "gather_models",
+                                    ui.div(
+                                        ui.span("参与集成的基础模型（留空或选择 ALL 表示全部支持的模型）：", class_="lang-zh"),
+                                        ui.span("Base models for ensemble (leave empty or choose ALL for all supported models):", class_="lang-en"),
+                                    ),
+                                    choices={
+                                        "all": "ALL（所有支持的经典模型，推荐）",
+                                        "SVM": "SVM",
+                                        "Ridge": "Ridge",
+                                        "Lasso": "Lasso",
+                                        "Elasticnet": "Elasticnet",
+                                        "Decision_tree": "Decision_tree",
+                                        "Random_forest": "Random_forest",
+                                        "LightGBM": "LightGBM",
+                                        "XGBoost": "XGBoost",
+                                        "Linear": "Linear",
+                                        "PLS": "PLS",
+                                        "GBM": "GBM",
+                                    },
+                                    multiple=True,
+                                    options={"placeholder": "Default ALL if empty / 不选择则默认 ALL"}
+                                )
+                            )
                         )
                     ),
-                    # 参数文件上传（恢复原始结构）
+                    # 参数文件上传
                     ui.panel_conditional(
                         "input.model_type == 'params_file'",
-                        ui.input_file("model_params", "上传超参数文件")
+                        ui.input_file(
+                            "model_params",
+                            ui.div(
+                                ui.span("上传超参数文件", class_="lang-zh"),
+                                ui.span("Upload hyperparameter file", class_="lang-en"),
+                            ),
+                        )
                     ),
-                    # Keras模型上传（恢复原始结构）
+                    # Keras模型上传
                     ui.panel_conditional(
                         "input.model_type == 'keras_model'",
-                        ui.input_file("model_frame", "上传Keras模型文件")
+                        ui.input_file(
+                            "model_frame",
+                            ui.div(
+                                ui.span("上传Keras模型文件", class_="lang-zh"),
+                                ui.span("Upload Keras model file", class_="lang-en"),
+                            ),
+                        )
+                    ),
+                    ui.hr(),
+                    # DR 选择（多选）
+                    ui.input_selectize(
+                        "dr_methods",
+                        ui.div(
+                            ui.span("个体相似度降维 DR（可选，仅支持 SVM/Ridge/Lasso/Elasticnet/Random_forest/Linear/PLS/GBM）:", class_="lang-zh"),
+                            ui.span("Individual similarity dimension reduction DR (optional, only supports SVM/Ridge/Lasso/Elasticnet/Random_forest/Linear/PLS/GBM):", class_="lang-en"),
+                            ui.tags.i(
+                                class_="fa-solid fa-circle-question",
+                                style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                title="Use similarity-based dimension reduction between individuals; leave empty to disable, or choose auto / 使用基于个体相似度的降维方法，可留空表示不使用，或选择 auto 自动搜索",
+                                data_bs_toggle="tooltip",
+                                data_bs_placement="top"
+                            ),
+                        ),
+                        choices={
+                            "auto": "auto (automatically selects best DR / 自动选择最佳 DR，推荐)",
+                            "euclidean": "euclidean",
+                            "cosine": "cosine",
+                            "hamming": "hamming",
+                            "manhattan": "manhattan",
+                            "pearson": "pearson",
+                            "van_raden": "van_raden",
+                            "yang_grm": "yang_grm",
+                            "kl_divergence": "kl_divergence",
+                        },
+                        multiple=True,
+                        options={"placeholder": "No DR if empty / 不选择则不使用 DR"}
+                    ),
+                    ui.hr(),
+                    ui.input_checkbox(
+                        "use_val",
+                        ui.div(
+                            ui.span("上传独立验证集（Val）以计算 Pearson（列号与训练表型相同）", class_="lang-zh"),
+                            ui.span("Upload an independent validation set (Val) to calculate Pearson (column index consistent with training phenotype)", class_="lang-en"),
+                            ui.tags.i(
+                                class_="fa-solid fa-circle-question",
+                                style="color: #666; cursor: help; margin-left: 8px; vertical-align: middle;",
+                                title="Optional: provide an external validation phenotype file to compute Pearson on an independent set / 可选：上传外部验证表型文件，在独立验证集中计算 Pearson 相关",
+                                data_bs_toggle="tooltip",
+                                data_bs_placement="top"
+                            ),
+                        ),
+                        value=False
+                    ),
+                    ui.panel_conditional(
+                        "input.use_val",
+                        ui.input_file(
+                            "val_file",
+                            ui.div(
+                                ui.span("选择验证集表型文件（TXT，可选）", class_="lang-zh"),
+                                ui.span("Choose validation phenotype file (TXT, optional)", class_="lang-en"),
+                            ),
+                            accept=[".txt"],
+                        )
                     )
                 ),  # 闭合模型设置卡片
                 # 新增运行结果卡片
                 ui.card(
-                    ui.card_header("运行控制"),
+                    ui.card_header(
+                        ui.span("运行控制", class_="lang-zh"),
+                        ui.span("Run control", class_="lang-en"),
+                    ),
                     ui.input_action_button(
                         "run_analysis",
-                        "开始计算",
+                        ui.div(
+                            ui.span("开始计算", class_="lang-zh"),
+                            ui.span("Start analysis", class_="lang-en"),
+                        ),
                         class_="btn-primary",
                         style="margin-top: 20px; background-color: #20894d;"
                     ),
                     ui.card(
-                        ui.card_header("分析结果"),
+                        ui.card_header(
+                            ui.span("分析结果", class_="lang-zh"),
+                            ui.span("Analysis results", class_="lang-en"),
+                        ),
                         ui.layout_columns(
                             ui.download_button(
                                 "download_pred", 
-                                "下载预测结果",
+                                ui.div(
+                                    ui.span("下载预测结果", class_="lang-zh"),
+                                    ui.span("Download prediction", class_="lang-en"),
+                                ),
                                 class_="custom-download-button",
                                 style="margin: 5px;"
                             ),
                             ui.download_button(
                                 "download_model", 
-                                "下载模型参数",
+                                ui.div(
+                                    ui.span("下载模型参数", class_="lang-zh"),
+                                    ui.span("Download model parameters", class_="lang-en"),
+                                ),
                                 class_="custom-download-button",
                                 style="margin: 5px;"
                             ),
@@ -528,38 +736,38 @@ app_ui = ui.page_navbar(
             style="padding: 20px;"
         )
     ),  # 闭合在线使用nav_panel
-    # page_navbar关键字参数（修复缩进和拼写错误）
+    # page_navbar关键字参数（标题、语言切换与右上角主页按钮）
     title=ui.div(
         ui.span("IASML", style="font-weight: 600;"),
         ui.div(
             ui.a(
-                "IASBreeding主页",
-                href="https://iasbreeding.cn",
-                class_="btn",
-                style=(
-                    "background-color: #20894d; color: white; "
-                    "position: fixed; right: 30px; top: 20px; z-index: 1000;"  # 改为固定定位
-                )
+                "EN",
+                href="#",
+                id="lang-switch-en",
+                style="margin-right: 8px; font-size: 0.9rem;",
             ),
-            style="position: static;"  # 移除父容器定位
-        ),       
-        ui.a(
-            "IASML主页",
-            href="https://iasbreeding.cn/IASML_zh",
-            class_="btn ms-auto",
-            style="background-color: #20894d; color: white; margin-right: 30px;"
+            ui.a(
+                "中文",
+                href="#",
+                id="lang-switch-zh",
+                style="margin-right: 16px; font-size: 0.9rem;",
+            ),
+            ui.a(
+                "IASBreeding home",
+                href="https://iasbreeding.cn",
+                class_="btn btn-sm",
+                style="background-color: #20894d; color: white;",
+            ),
+            style="margin-left: auto; display: flex; align-items: center; gap: 4px;",
         ),
         style=("display: flex; align-items: center; width: 100%; "
-               "justify-content: space-between; gap: 20px;")  # 新增gap间距
-    ),  
+               "gap: 20px;"),
+    ),
     # ... 其他参数不变 ...
 )
 
 # ========== 服务器端定义 ==========
 def server(input, output, session):
-    session.session_settings = {
-        "timeout": 720  # 延长至12小时
-    }
     analysis_status = value("pending")  # Instead of reactive.Value()
     log_content = value("")
     last_position = value(0)
@@ -583,7 +791,7 @@ def server(input, output, session):
             df = pd.read_csv(file_info[0]['datapath'], sep='\t', nrows=0)
             pheno_columns.set(list(df.columns))
         except Exception as e:
-            ui.notification_show(f"文件读取失败: {str(e)}", duration=5, type="error")
+            ui.notification_show(f"Failed to read phenotype file / 文件读取失败: {str(e)}", duration=5, type="error")
 
     @reactive.Effect
     @reactive.event(input.geno_file)
@@ -598,18 +806,18 @@ def server(input, output, session):
                 file_path = Path(file['datapath'])
                 size_mb = file_path.stat().st_size / (1024 ** 2)
                 if size_mb > 100:
-                    ui.notification_show(f"基因型文件 {file['name']} 大小({size_mb:.1f}MB)超过限制", duration=10, type="error")
+                    ui.notification_show(f"Genotype file {file['name']} size ({size_mb:.1f}MB) exceeds limit / 基因型文件大小超过限制", duration=10, type="error")
                     input.geno_file.set(None)  # 清空无效文件
                     return
         except Exception as e:
-            ui.notification_show(f"文件校验失败: {str(e)}", duration=10, type="error")
+            ui.notification_show(f"File validation failed / 文件校验失败: {str(e)}", duration=10, type="error")
 
     @output
     @render.ui
     def pheno_column_selector():
         """生成表型列选择器"""
         if not pheno_columns():
-            return ui.div("请先上传表型文件", class_="text-muted")
+            return ui.div("Please upload phenotype file first / 请先上传表型文件", class_="text-muted")
             
         return ui.input_select(
             "selected_pheno",
@@ -622,7 +830,7 @@ def server(input, output, session):
     def covariate_selectors():
         """生成协变量选择器"""
         if not pheno_columns():
-            return ui.div("请先上传表型文件", class_="text-muted")
+            return ui.div("Please upload phenotype file first / 请先上传表型文件", class_="text-muted")
             
         return ui.TagList(
             ui.input_selectize(
@@ -655,45 +863,140 @@ def server(input, output, session):
             pheno_pos = input.selected_pheno()
             factor_covars = input.factor_covars()
             numeric_covars = input.numeric_covars()
+
+            # 基本必填校验，避免传入不合法命令给 IASML
+            if not pheno_pos:
+                ui.notification_show("Please select a phenotype column / 请选择表型列。", duration=5, type="error")
+                analysis_status.set("pending")
+                return
+
+            model_type_ui = input.model_type()
+            if not model_type_ui:
+                ui.notification_show("Please select a model type (predefined / parameter file / Keras) / 请选择模型类型（预置模型 / 超参数文件 / Keras 模型）。", duration=5, type="error")
+                analysis_status.set("pending")
+                return
             
-            # 动态模型参数处理（修复逻辑）
+            # 动态模型参数处理（只构建 IASML 的参数列表，具体 python 调用在 AnalysisExecutor 中构建）
             cmd = []
-            if input.model_type() == "prebuilt":
-                cmd += ["--model", input.model()]
-            elif input.model_type() == "params_file":
+            if model_type_ui == "prebuilt":
+                # 将界面上的模型名称映射为 IASML 命令行模型名（如 Ridge -> ridge）
+                model_ui = input.model()
+                if not model_ui:
+                    ui.notification_show("Please select a specific predefined model / 请选择具体的预置模型。", duration=5, type="error")
+                    analysis_status.set("pending")
+                    return
+                model_cli = MODEL_NAME_MAP.get(model_ui)
+                if not model_cli:
+                    raise ValueError(f"Unsupported predefined model: {model_ui}")
+
+                use_gather = bool(input.use_gather())
+                if use_gather:
+                    gather_models_ui = input.gather_models() or []
+                    if (not gather_models_ui) or ("all" in gather_models_ui):
+                        # 默认使用全部支持 gather 的经典模型
+                        cmd += ["--gather", "all"]
+                    else:
+                        gather_cli = []
+                        for m in gather_models_ui:
+                            if m == "all":
+                                continue
+                            mc = MODEL_NAME_MAP.get(m)
+                            if mc is None:
+                                raise ValueError(f"gather 中包含不支持的模型: {m}")
+                            gather_cli.append(mc)
+                        if not gather_cli:
+                            cmd += ["--gather", "all"]
+                        else:
+                            cmd += ["--gather", *gather_cli]
+                else:
+                    cmd += ["--model", model_cli]
+            elif model_type_ui == "params_file":
                 if not input.model_params():
-                    raise ValueError("请上传超参数文件")
+                    raise ValueError("Please upload a hyperparameter file / 请上传超参数文件")
                 cmd += ["--model-params", str(Path(input.model_params()[0]['datapath']))]
-            elif input.model_type() == "keras_model":
+            elif model_type_ui == "keras_model":
                 if not input.model_frame():
-                    raise ValueError("请上传Keras模型文件")
+                    raise ValueError("Please upload a Keras model file / 请上传Keras模型文件")
                 cmd += ["--model-frame", str(Path(input.model_frame()[0]['datapath']))]
             
-            # 基础参数（修复文件路径处理）
+            # 基础参数（表型、协变量、统一输出前缀）
             cmd += [
-                "python", "IASML.py",
                 "--phe", str(Path(input.pheno_file()[0]['datapath'])),
                 "--phe-pos", pheno_pos,
                 "--f", ",".join(factor_covars) if factor_covars else "0",
-                "--n", ",".join(numeric_covars) if numeric_covars else "0"
+                "--n", ",".join(numeric_covars) if numeric_covars else "0",
+                "--out", "result",  # 固定输出前缀，IASML 将生成 result_predict.txt / result_model.txt
             ]
-
-            # 基因型文件处理（修复路径获取）
+            
+            # 基因型文件处理
             if input.file_type() == "bfile":
-                geno_path = Path(input.geno_file()[0]['datapath'])
-                cmd += ["--bfile", str(geno_path.parent / geno_path.stem)]
+                # 三件套：从上传列表中根据扩展名识别 bed/bim/fam
+                files = input.geno_file()
+                bed_file = next((f for f in files if f['name'].lower().endswith('.bed')), None)
+                bim_file = next((f for f in files if f['name'].lower().endswith('.bim')), None)
+                fam_file = next((f for f in files if f['name'].lower().endswith('.fam')), None)
+                if not (bed_file and bim_file and fam_file):
+                    raise ValueError("Please upload Plink-format .bed/.bim/.fam files / 请上传Plink格式的 .bed/.bim/.fam 三个文件")
+
+                # 为本次运行创建一个工作目录，放在统一的 WORK_ROOT 下
+                geno_root = WORK_ROOT / "plink_uploads"
+                geno_root.mkdir(parents=True, exist_ok=True)
+                run_dir = geno_root / time.strftime("%Y%m%d-%H%M%S")
+                run_dir.mkdir(exist_ok=True)
+
+                # 使用原始文件名复制到 run_dir
+                bed_path = run_dir / Path(bed_file['name']).name
+                bim_path = run_dir / Path(bim_file['name']).name
+                fam_path = run_dir / Path(fam_file['name']).name
+                shutil.copy(bed_file['datapath'], bed_path)
+                shutil.copy(bim_file['datapath'], bim_path)
+                shutil.copy(fam_file['datapath'], fam_path)
+
+                # 以前缀（去掉 .bed 扩展）作为 --bfile 前缀
+                prefix = Path(bed_file['name']).stem
+                bfile_prefix = run_dir / prefix
+                cmd += ["--bfile", str(bfile_prefix)]
             else:
-                cmd += ["--tfile", str(Path(input.geno_file()[0]['datapath']))]
+                # TXT 特征：复制到专用目录，并用 --tfile 传绝对路径
+                files = input.geno_file()
+                if not files:
+                    raise ValueError("Please upload a genotype TXT file / 请上传基因型TXT文件")
+                geno_root = WORK_ROOT / "plink_uploads"
+                geno_root.mkdir(parents=True, exist_ok=True)
+                run_dir = geno_root / time.strftime("%Y%m%d-%H%M%S")
+                run_dir.mkdir(exist_ok=True)
+                geno_file = files[0]
+                geno_path = run_dir / Path(geno_file["name"]).name
+                shutil.copy(geno_file["datapath"], geno_path)
+                cmd += ["--tfile", str(geno_path)]
+
+            # DR 参数处理
+            dr_methods = input.dr_methods()
+            if dr_methods:
+                # 防止同时选择 auto 和其他方法
+                if "auto" in dr_methods and len(dr_methods) > 1:
+                    raise ValueError("DR cannot select 'auto' and specific methods at the same time; keep only 'auto' or remove it / DR 参数不能同时选择 'auto' 和其他方法，请只保留 auto 或去掉 auto。")
+                cmd += ["--DR", *dr_methods]
+
+            # 验证集 Val 处理（与训练表型列号一致）
+            if input.use_val():
+                val_info = input.val_file()
+                if not val_info:
+                    raise ValueError("Please choose a validation phenotype file or uncheck the validation option / 请选择验证集表型文件或取消勾选验证集选项。")
+                val_path = Path(val_info[0]['datapath'])
+                cmd += ["--Val", str(val_path), "--Val-pos", pheno_pos]
 
             # 执行分析
             executor = AnalysisExecutor()
             result = await executor.execute(cmd=cmd)
             analysis_result.set(result)
+            analysis_status.set("running" if result.get("success") else "failed")
             
         except Exception as e:
             # 添加错误提示
-            ui.notification_show(f"分析失败: {str(e)}", duration=10, type="error")
+            ui.notification_show(f"Analysis failed / 分析失败: {str(e)}", duration=10, type="error")
             logging.exception("分析错误详情：")
+            analysis_status.set("failed")
 
     # 确保结果变量已定义
     analysis_result = reactive.Value(None)
@@ -704,27 +1007,27 @@ def server(input, output, session):
     def download_pred():
         """下载当前计算的预测结果"""
         if not analysis_result() or not analysis_result().get('success'):
-            raise Exception("请先完成计算")
+            raise Exception("Please complete an analysis first / 请先完成计算")
         
         # 直接使用当前计算目录
         current_work_dir = Path(analysis_result().get('result_path'))
         pred_files = list(current_work_dir.glob("result_predict.txt"))
         if pred_files:
             return str(pred_files[0])
-        raise Exception("预测文件未找到")
+        raise Exception("Prediction file not found / 预测文件未找到")
 
     @output
     @render.download()
     def download_model():
         """下载当前计算的模型参数"""
         if not analysis_result() or not analysis_result().get('success'):
-            raise Exception("请先完成计算")
+            raise Exception("Please complete an analysis first / 请先完成计算")
         
         current_work_dir = Path(analysis_result().get('result_path'))
         model_files = list(current_work_dir.glob("result_model.txt")) + list(current_work_dir.glob("result_model.keras"))
         if model_files:
             return str(model_files[0])
-        raise Exception("模型文件未找到")
+        raise Exception("Model file not found / 模型文件未找到")
 
     # 修正结果显示逻辑（删除重复定义）
     @output
@@ -733,36 +1036,42 @@ def server(input, output, session):
     def result_log():
         status = analysis_status()  # 假设这是一个响应式变量
         
-        if status == "pending":
-            return ui.div("等待分析开始...", class_="text-muted")
-        elif status == "running":
+        # 如果还没有执行结果，优先返回友好提示，避免 NoneType 错误
+        if not analysis_result() and status != "running":
+            return ui.div("Waiting for analysis to start / 等待开始分析。", class_="text-muted")
 
-            log_path = Path(analysis_result().get('result_path')) / "IASML.log"
+        if status == "pending":
+            return ui.div("Waiting for analysis to start... / 等待分析开始...", class_="text-muted")
+        elif status == "running":
             try:
+                result = analysis_result()
+                if not result:
+                    return ui.div("Starting analysis, please wait... / 正在启动分析，请稍候...", class_="text-info")
+                log_path = Path(result.get('result_path')) / "IASML.log"
                 if log_path.exists():
                     import subprocess
-                    result = subprocess.run(['tail', '-n', '100', str(log_path)], capture_output=True, text=True)
-                    log_content = result.stdout
+                    proc = subprocess.run(['tail', '-n', '100', str(log_path)], capture_output=True, text=True)
+                    _log_content = proc.stdout
                     return ui.div(
                         ui.pre(
-                            log_content,
+                            _log_content,
                             style="height: 400px; overflow-y: auto; background-color: #f8f9fa; padding: 10px;"
                         ),
                         class_="live-log"
                     )
                 else:
-                    return ui.div("正在等待日志文件生成...", class_="text-info")
+                    return ui.div("Waiting for log file to be generated... / 正在等待日志文件生成...", class_="text-info")
             except Exception as e:
-                return ui.div(f"日志读取失败: {str(e)}", class_="text-danger")
+                return ui.div(f"Failed to read log / 日志读取失败: {str(e)}", class_="text-danger")
+        elif status == "failed":
+            return ui.div("The last analysis failed, please check inputs or try again / 最近一次分析失败，请检查输入或重试。", class_="text-danger")
         else:
-            return ui.div("未知状态！", class_="text-danger")
+            return ui.div("Unknown status / 未知状态！", class_="text-danger")
 
-from fastapi.responses import RedirectResponse  # 新增导入
-
-# ========== 应用实例化 ==========
+ # ========== 应用实例化 ==========
 app = App(app_ui, server)
 
 # ========== 启动配置 ========== 
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8001)
+    app.run(host='0.0.0.0', port=18001)
